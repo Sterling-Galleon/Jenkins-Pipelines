@@ -1,0 +1,194 @@
+#!groovy
+
+/**
+ * Release Pull Request Jenkinsfile
+ *
+ * Automatically creates a pull request on GitHub when a push is detected in the development branch
+ * 
+ * Setup:
+ * - Configure the environment variables accordingly
+ * - Ensure that the `jenkins` user can run `hub`
+ * - Ensure that `hub` is at version 2.3.0-pre10 which allows for adding of reviewers via `hub pull-request -r PERSON1,PERSON2`
+ */
+pipeline {
+    agent any
+
+    environment {
+        REPO_URL = 'git@github.com:All-Hands-On-Deck/Jenkins-Pipelines.git' // Your GitHub Repository
+        DEVELOP_BRANCH = 'develop' // Your Development Branch
+        PRODUCTION_BRANCH = 'master' // Your Production Branch
+        HUB_CONFIG = '/var/lib/jenkins/.config/hub' // Where your hub config file will be stored
+        SLACK_JENKINS_CHANNEL = 'jenkins-builds' // Build status updates are announced here
+        SLACK_PR_CHANNEL = 'galleon-prs' // New release pull requests are announced here
+
+        REVIEWERS = 'github-reviewers' // Jenkins file config ID for setting reviewers
+        GIT_CREDENTIALS_ID = 'github-credentials' // Your GitHub credentials ID
+        GITHUB_MACHINE_USER_PASS = 'github-machine-user' // Username/password credentials for your machine user
+        GITHUB_MACHINE_USER_TOKEN = 'github-machine-user-token' // Secret text credentials for the token of your machine user
+    }
+
+    stages {
+        stage('Pre Build') {
+            steps {
+                slackSend color: 'good', channel: env.SLACK_JENKINS_CHANNEL, \
+                    message: "STARTED: `${env.JOB_NAME}` Build #${env.BUILD_NUMBER} ${env.RUN_DISPLAY_URL}"
+                cleanWs()
+
+                script {
+                    // init global vars
+                    env.RELEASE_BRANCH_EXISTS = false
+                    env.SKIP_BUILD = false
+                }
+            }
+        }
+
+        stage('Create Release') {
+            steps {
+                echo 'Checking out codebase...'
+                git credentialsId: env.GIT_CREDENTIALS_ID, url: env.REPO_URL, branch: env.DEVELOP_BRANCH
+
+                echo 'Creating release...'
+                script {
+                    try {
+                        getLatestTag = "git describe --abbrev=0 --tags origin/${env.PRODUCTION_BRANCH}"
+                        currentVersion = sh(returnStdout: true, script: getLatestTag).trim()
+                    } catch (Exception e) {
+                        currentVersion = '0.0.0'
+                    }
+
+                    releaseVersion = getVersionBump(currentVersion, env.VERSION_BUMP)
+                    releaseBranch = "release/${releaseVersion}"
+
+                    // Skip the job if develop is not ahead of master
+                    checkDevelopBranch = "git rev-list --left-right --no-merges --count origin/${env.DEVELOP_BRANCH}...origin/${env.PRODUCTION_BRANCH} | cut -f1"
+                    isDevelopAheadMaster = sh(returnStdout: true, script: checkDevelopBranch).trim().toInteger() > 0
+                    if (!isDevelopAheadMaster) {
+                        echo "Skipping build..."
+                        slackSend color: 'grey', channel: env.SLACK_JENKINS_CHANNEL, \
+                            message: "SKIPPED: `${env.JOB_NAME}` Build #${env.BUILD_NUMBER} ${env.RUN_DISPLAY_URL}"
+                        env.SKIP_BUILD = true
+                        return
+                    }
+
+                    sshagent (credentials: [env.GIT_CREDENTIALS_ID]) {
+                        checkReleaseBranch = "git branch -a | grep 'origin/${releaseBranch}\$' | wc -l"
+                        env.RELEASE_BRANCH_EXISTS = sh(returnStdout: true, script: checkReleaseBranch).trim().toInteger() > 0
+                        echo "Does Release Branch Exist? ${env.RELEASE_BRANCH_EXISTS}"
+
+                        if (env.RELEASE_BRANCH_EXISTS.toBoolean()) {
+                            sh "git checkout ${releaseBranch}"
+                            sh "git rebase ${env.DEVELOP_BRANCH}"
+                            sh "git push --force origin ${releaseBranch}"
+                        } else {
+                            sh "git checkout -b ${releaseBranch}"   
+                            sh "git push origin ${releaseBranch}"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Create Pull Request') {
+            when {
+                not { expression { return env.SKIP_BUILD.toBoolean() } }
+            }
+            steps {
+                echo "Creating pull request for release ${releaseVersion}"
+                script {
+                    generateHubConfig()
+
+                    // Get reviewers from config
+                    configFileProvider([
+                        configFile(fileId: env.REVIEWERS, variable: 'reviewers')]) {
+
+                        try {
+                            pullRequestMessage = getPullRequestMessage(releaseVersion)
+                            pullRequestMessage = pullRequestMessage.replace("'", "\\'")
+                            createPullRequest = "hub pull-request -m '${pullRequestMessage}' -b ${PRODUCTION_BRANCH} -h ${releaseBranch} -r ${readFile(reviewers)}"
+
+                            echo "Running: ${createPullRequest}"
+
+                            pullRequestUrl = sh(returnStdout: true, script: createPullRequest).trim()
+                        } catch (Exception e) {} // Pull request already exists, silence error
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                slackSend color: 'good', channel: env.SLACK_JENKINS_CHANNEL, \
+                    message: "FINISHED: `${env.JOB_NAME}` Build #${env.BUILD_NUMBER} ${env.RUN_DISPLAY_URL}"
+
+                if (env.SKIP_BUILD.toBoolean()) return
+
+                message = env.RELEASE_BRANCH_EXISTS.toBoolean()
+                    ? "@here Release ${releaseVersion} updated with latest changes from `${env.DEVELOP_BRANCH}`"
+                    : "@here New release pull request ready for review: ${pullRequestUrl}"
+                slackSend color: 'good', channel: env.SLACK_PR_CHANNEL, message: message
+            }
+        }
+        
+        failure {
+            slackSend color: 'red', channel: env.SLACK_JENKINS_CHANNEL, \
+                message: "FAILED: `${env.JOB_NAME}` Build #${env.BUILD_NUMBER} ${env.RUN_DISPLAY_URL}"  
+        }
+    }
+}
+
+/**
+ * Get version bump
+ *
+ * Bumps the current version by PATCH (x.x.1) or by MINOR (x.1.0)
+ * provided by build parameters (defaults to PATCH)
+ */
+String getVersionBump(String currentVersion, String versionBump = 'patch') {
+    (major, minor, patch) = currentVersion.split('\\.')
+    if (versionBump.toLowerCase() == 'patch') {
+        return [major, minor, patch.toInteger() + 1].join('.')
+    } 
+    return [major, minor.toInteger() + 1, 0].join('.')
+}
+
+/**
+ * Generate hub config file
+ *
+ * Creates a hub config file required to authenticate GitHub API HTTPS requests
+ */
+Void generateHubConfig() {
+    if (!fileExists(env.HUB_CONFIG)) {
+        withCredentials([
+            string(credentialsId: env.GITHUB_MACHINE_USER_TOKEN, variable: 'token'),
+            usernamePassword(credentialsId: env.GITHUB_MACHINE_USER_PASS, passwordVariable: 'password', usernameVariable: 'username')]) {
+
+                writeFile file: env.HUB_CONFIG, text: """github.com:
+- user: ${username}
+  oauth_token: ${token}
+  protocol: https"""
+        }
+    }
+}
+
+/**
+ * Get pull request message
+ * 
+ * Generates a pull request message for release in the following format:
+ * 
+ * Release vX.Y.Z
+ * 
+ * X.Y.Z/YYYY-MM-DD
+ * =============
+ * Changelog
+ */
+String getPullRequestMessage(String releaseVersion) {
+    changelog = sh(returnStdout:true, script: "git changelog -n -x -p -t ${releaseVersion}").trim()
+    if (changelog.contains('ERROR')) {
+        return "Release ${releaseVersion}"
+    }
+
+    return """Release ${releaseVersion}
+
+${changelog}"""
+}
