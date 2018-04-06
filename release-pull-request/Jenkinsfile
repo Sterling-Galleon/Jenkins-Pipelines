@@ -14,17 +14,17 @@ pipeline {
     agent any
 
     environment {
-        REPO_URL = 'git@github.com:your/repository.git'
-        DEVELOP_BRANCH = 'yourdevelopbranch'
-        PRODUCTION_BRANCH = 'yourproductionbranch'
-        HUB_CONFIG = '/var/lib/jenkins/.config/hub'
-        SLACK_JENKINS_CHANNEL = 'yourjenkinschannel' // Build status updates are announced here
-        SLACK_PR_CHANNEL = 'yourpullrequestchannel' // New release pull requests are announced here
+        REPO_URL = 'git@github.com:All-Hands-On-Deck/Jenkins-Pipelines.git' // Your GitHub Repository
+        DEVELOP_BRANCH = 'develop' // Your Development Branch
+        PRODUCTION_BRANCH = 'master' // Your Production Branch
+        HUB_CONFIG = '/var/lib/jenkins/.config/hub' // Where your hub config file will be stored
+        SLACK_JENKINS_CHANNEL = 'jenkins-builds' // Build status updates are announced here
+        SLACK_PR_CHANNEL = 'galleon-prs' // New release pull requests are announced here
 
-        REVIEWERS = 'your-reviewers' // Jenkins file config ID for setting reviewers
-        GIT_CREDENTIALS_ID = 'your-github-credentials' // Your GitHub credentials ID
-        GITHUB_MACHINE_USER_PASS = 'your-github-machine-user' // Username/password credentials for your machine user
-        GITHUB_MACHINE_USER_TOKEN = 'your-github-machine-user-token' // Secret text credentials for the token of your machine user
+        REVIEWERS = 'github-reviewers' // Jenkins file config ID for setting reviewers
+        GIT_CREDENTIALS_ID = 'github-credentials' // Your GitHub credentials ID
+        GITHUB_MACHINE_USER_PASS = 'github-machine-user' // Username/password credentials for your machine user
+        GITHUB_MACHINE_USER_TOKEN = 'github-machine-user-token' // Secret text credentials for the token of your machine user
     }
 
     stages {
@@ -141,7 +141,7 @@ pipeline {
 /**
  * Get version bump
  *
- * Bumps the current version by PATCH (x.x.1) or by MINOR (x.1)
+ * Bumps the current version by PATCH (x.x.1) or by MINOR (x.1.0)
  * provided by build parameters (defaults to PATCH)
  */
 String getVersionBump(String currentVersion, String versionBump = 'patch') {
