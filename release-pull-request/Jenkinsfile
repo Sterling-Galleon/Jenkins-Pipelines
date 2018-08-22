@@ -14,7 +14,7 @@ pipeline {
     agent any
 
     environment {
-        REPO_URL = 'git@github.com:All-Hands-On-Deck/Jenkins-Pipelines.git' // Your GitHub Repository
+        REPO_URL = 'git@github.com:Sterling-Galleon/Jenkins-Pipelines.git' // Your GitHub Repository
         DEVELOP_BRANCH = 'develop' // Your Development Branch
         PRODUCTION_BRANCH = 'master' // Your Production Branch
         HUB_CONFIG = '/var/lib/jenkins/.config/hub' // Where your hub config file will be stored
