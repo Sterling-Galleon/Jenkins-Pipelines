@@ -1,0 +1,183 @@
+#!/usr/bin/env groovy
+
+/**
+ * Release/HotFix Pull Request Approval Jenkinsfile
+ *
+ * Automatically create a changelog in the codebase, merge the branch into the `master` branch and create a `tag` with the version of this release or hotfix
+ *
+ */
+pipeline {
+    agent any
+
+    environment {
+        REPO_URL = 'git@github.com:Sterling-Galleon/Jenkins-Pipelines.git' // Your GitHub Repository
+        DEVELOP_BRANCH = 'develop' // Your Development Branch
+        PRODUCTION_BRANCH = 'master' // Your Production Branch
+        SLACK_JENKINS_CHANNEL = 'jenkins-builds' // Build status updates are announced here
+        SLACK_PR_CHANNEL = 'galleon-prs' // New release pull requests are announced here
+
+        REVIEWERS = 'github-reviewers' // Jenkins file config ID for setting reviewers
+        GIT_CREDENTIALS_ID = 'github-credentials' // Your GitHub credentials ID
+        GITHUB_MACHINE_USER_PASS = 'github-machine-user' // Username/password credentials for your machine user
+        GITHUB_MACHINE_USER_TOKEN = 'github-machine-user-token' // Secret text credentials for the token of your machine user
+
+        SKIP_BUILD = false
+        RELEASE_BRANCH_EXISTS = false
+    }
+
+    stages {
+        stage('Pre Build') {
+            steps {
+                slackSend color: 'good', channel: env.SLACK_JENKINS_CHANNEL, \
+                    message: "STARTED CREATING CHANGELOG: `${env.JOB_NAME}` Build #${env.BUILD_NUMBER} ${env.RUN_DISPLAY_URL}"
+                cleanWs()
+            }
+        }
+
+        stage('Prepare Changelog') {
+            steps {
+                echo 'Checking out codebase...'
+                git credentialsId: env.GIT_CREDENTIALS_ID, url: env.REPO_URL, branch: env.DEVELOP_BRANCH
+
+                echo 'Creating changelog...'
+                script {
+
+                    // Skip build if reviewStatus is not 'approved'
+                    // Or the base branch is not master
+                    if (reviewStatus != 'approved' || baseBranch != env.PRODUCTION_BRANCH) {
+                        echo "Skipping build..."
+                        slackSend color: 'grey', channel: env.SLACK_JENKINS_CHANNEL, \
+                            message: "SKIPPED: `${env.JOB_NAME}` Build #${env.BUILD_NUMBER} ${env.RUN_DISPLAY_URL}"
+                        env.SKIP_BUILD = true
+                        return
+                    }
+
+                    // Switch to branch of PR
+                    sh "git checkout ${currentBranch}"
+
+                    // Get the latest tag
+                    try {
+                        getLatestTag = 'git describe --abbrev=0 --tags'
+                        latestTag = sh(returnStdout: true, script: getLatestTag).trim()
+                    } catch (Exception e) {
+                        latestTag = '0.0.0'
+                    }
+
+                    // Generate CHANGELOG.md
+                    getChangelog = "git changelog -n -x -t ${latestTag}"
+                    changelog = sh(returnStdout: true, script: getChangelog).trim()
+
+                    writeFile file: 'CHANGELOG.md', text: changelog 
+
+                    // Commit CHANGELOG.md
+                    withCredentials([
+                        string(credentialsId: env.GITHUB_MACHINE_USER_TOKEN, variable: 'token'),
+                        usernamePassword(credentialsId: env.GITHUB_MACHINE_USER_PASS, passwordVariable: 'password', usernameVariable: 'username')]) {
+
+                        sh "git add CHANGELOG.md"
+                        sh "git commit -m 'Updated changelog'"
+                    }
+                }
+            }
+        }
+
+        stage('Merge to master') {
+            when {
+                not { expression { return env.SKIP_BUILD.toBoolean() } }
+            }
+            steps {
+                script {
+                    // Merge the current branch to master
+                    sh "git checkout ${env.PRODUCTION_BRANCH}"
+                    sh "git merge --no-ff ${currentBranch}"
+                }
+            }
+        }
+
+        stage('Create tag') {
+            when {
+                not { expression { return env.SKIP_BUILD.toBoolean() } }
+            }
+            steps {
+                script {
+                    // Get the tag name from branch name and tag the commit
+                    tagname = getTagnameFromBranch(currentBranch)
+                    sh "git tag -a ${tagname} -m '${tagname}'"
+                }
+            }
+        }
+
+        stage('Merge to develop') {
+            when {
+                not { expression { return env.SKIP_BUILD.toBoolean() } }
+            }
+            steps {
+                script {
+                    // Merge the current branch to develop
+                    sh "git checkout ${env.DEVELOP_BRANCH}"
+                    sh "git merge --no-ff ${currentBranch}"
+                }
+            }
+        }
+
+        stage('Delete current branch') {
+            when {
+                not { expression { return env.SKIP_BUILD.toBoolean() } }
+            }
+            steps {
+                script {
+                    sh "git branch -D ${currentBranch}"
+                }
+            }
+        }
+
+        stage('Push to remote') {
+            when {
+                not { expression { return env.SKIP_BUILD.toBoolean() } }
+            }
+            steps {
+                script {
+                    // Push master and develop
+                    // And let remote know that the current branch has been deleted
+                    sshagent (credentials: [env.GIT_CREDENTIALS_ID]) {
+                        sh "git push origin ${env.PRODUCTION_BRANCH}"
+                        sh "git push origin ${env.DEVELOP_BRANCH}"
+                        sh "git push origin --tags"
+                        sh "git push origin :${currentBranch}"
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                if (env.SKIP_BUILD.toBoolean()) return
+
+                slackSend color: 'good', channel: env.SLACK_JENKINS_CHANNEL, \
+                    message: "FINISHED CHANGELOG: `${env.JOB_NAME}` Build #${env.BUILD_NUMBER} ${env.RUN_DISPLAY_URL}"
+            }
+        }
+        
+        failure {
+            slackSend color: 'red', channel: env.SLACK_JENKINS_CHANNEL, \
+                message: "FAILED TO CREATE CHANGELOG: `${env.JOB_NAME}` Build #${env.BUILD_NUMBER} ${env.RUN_DISPLAY_URL}"  
+        }
+    }
+}
+
+/**
+ * Get the tag name from branch name
+ *
+ * Ex. Given release/x.y.z as current branch name
+ * tag name should be x.y.z
+ * 
+ * Make sure that signatures are approved in Manage Jenkins > In-process Script Approval
+ */
+String getTagnameFromBranch(String branchname) {
+    tagnameFromBranch = branchname.findAll(/\/(.)+/)[0]
+
+    // Remove the leading slash
+    return tagnameFromBranch.subSequence(1, tagnameFromBranch.length())
+}
